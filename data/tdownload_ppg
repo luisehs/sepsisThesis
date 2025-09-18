@@ -1,0 +1,153 @@
+import os
+import warnings
+from pathlib import Path
+from datetime import datetime
+
+import numpy as np
+import pandas as pd
+import scipy.io as sio
+import neurokit2 as nk
+import wfdb
+
+warnings.filterwarnings("ignore")
+
+# === CONFIGURACIÓN ===
+pn_dir = r"L:\repositories\thesis\data"
+csv_filename = "csv\\nuevo_set.csv"
+csv_path = os.path.join(pn_dir, csv_filename)
+
+data_dir = r"L:/physionet.org/files/mimic3wdb-matched/1.0/"
+minutes = 1
+sampling_rate = 125
+segment_size = sampling_rate * 60 * minutes
+min_required_signal = sampling_rate * 10800  # 3 horas
+
+# === CARGAR CSV ===
+sepsis_filepaths = pd.read_csv(csv_path)
+sepsis_filepaths.drop_duplicates(subset='path', inplace=True)
+sepsis_filepaths.reset_index(drop=True, inplace=True)
+
+def save_ppg(pXX):
+    step = sampling_rate * (minutes * 60)
+    sepsis_subject = []
+    sepsis_data = []
+    sepsis_label = []
+    patient_type = []
+    criteria_text = []
+
+    for i in range(len(pXX)):
+        if i % 50 == 0:
+            print(f"\n[Checkpoint {i}]\n")
+
+        record_path = os.path.join(data_dir, pXX['path'][i])
+        hea_path = record_path + ".hea"
+        if not Path(hea_path).exists():
+            continue
+
+        try:
+            _, meta = wfdb.rdsamp(record_path, sampfrom=0, channel_names=['PLETH'])
+            sig_len = meta['sig_len']
+            if sig_len < min_required_signal:
+                continue
+        except Exception:
+            continue
+
+        try:
+            data, _ = wfdb.rdsamp(record_path,
+                                  sampfrom=sampling_rate * 3600,
+                                  sampto=sampling_rate * 10800,
+                                  channel_names=['PLETH'])
+        except Exception:
+            continue
+        
+        max_segments = 1 if pXX['patient_type'][i] == "Control" else 4
+        found_segments = 0
+
+        for j in range(0, len(data), step): 
+            if found_segments >= max_segments:
+                break
+
+            segment = data[j:j + step].flatten()
+
+            if segment.size == 0 or np.isnan(segment).all():
+                continue
+
+            try:
+                cleaned_seg = nk.ppg_clean(segment, sampling_rate=sampling_rate, method='elgendi')
+            except Exception as e:
+                print(f"[{i}] Cleaning failed at segment {j}: {e}")
+                continue
+
+            if (len(cleaned_seg) != step or
+                np.count_nonzero(cleaned_seg) == 0 or
+                np.all(np.abs(cleaned_seg) < 1e-6) or
+                len(np.unique(cleaned_seg)) <= len(cleaned_seg) * 0.15):
+                continue
+
+            # Guardar segmento válido
+            sepsis_subject.append(pXX['subject_id'][i])
+            sepsis_data.append(cleaned_seg)
+            # sepsis_label.append(pXX['sepsis_label'][i])
+            patient_type.append(pXX['patient_type'][i])
+            # criteria_text.append(pXX['criteria_text'][i])
+
+            found_segments += 1
+            print(f"[{i}] Segment {found_segments} saved for patient_type={pXX['patient_type'][i]}")       
+                   
+
+    # === CREAR DIRECTORIOS DE SALIDA ===
+    mat_dir = os.path.join(pn_dir, "datamat")
+    npy_dir = os.path.join(pn_dir, "datanpy")
+    meta_dir = os.path.join(pn_dir, "metadata")
+    os.makedirs(mat_dir, exist_ok=True)
+    os.makedirs(npy_dir, exist_ok=True)
+    os.makedirs(meta_dir, exist_ok=True)
+
+    # === DEFINIR NOMBRES DE ARCHIVOS ===
+    name_root = Path(csv_path).stem
+    base_name = f"{name_root}_{minutes}min"
+
+    mat_path = os.path.join(mat_dir, base_name + ".mat")
+    npy_path = os.path.join(npy_dir, base_name + ".npy")
+    csv_out_path = os.path.join(meta_dir, base_name + "_metadata.csv")
+
+    # === GUARDAR ARCHIVOS ===
+    data_dict = {
+        "subject": np.array(sepsis_subject),
+        "signal": np.array(sepsis_data),
+        # "target": np.array(sepsis_label),
+        "target": np.array(patient_type),
+        # "criteria_text": np.array(criteria_text)
+    }
+
+    sio.savemat(mat_path, data_dict)
+    np.save(npy_path, data_dict)
+
+    # Guardar CSV con solo registros válidos
+    metadata_df = pd.DataFrame({
+        "subject_id": sepsis_subject,
+        # "sepsis_label": sepsis_label,
+        "patient_type": patient_type,
+        # "criteria_text": criteria_text
+    })
+    metadata_df.to_csv(csv_out_path, index=False)
+
+    # === RESUMEN ESTADÍSTICO ===
+    print(f"\nSuccessfully saved {len(sepsis_data)} signals:")
+    print(f"→ .mat: {mat_path}")
+    print(f"→ .npy: {npy_path}")
+    print(f"→ .csv: {csv_out_path}\n")
+
+    print("Resumen por sepsis_label:")
+    # print(metadata_df["sepsis_label"].value_counts())
+    print("\nResumen por patient_type:")
+    print(metadata_df["patient_type"].value_counts())
+
+    return data_dict
+
+# === EJECUTAR PRUEBA ===
+# test_subset = sepsis_filepaths.iloc[:5].reset_index(drop=True)
+# _ = save_ppg(test_subset)
+
+# === PROCESAR TODO (descomentar para uso completo) ===
+_ = save_ppg(sepsis_filepaths)
