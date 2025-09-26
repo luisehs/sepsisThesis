@@ -71,7 +71,7 @@ for fold, (train_idx, test_idx) in enumerate(sss.split(df_balanced["prompt"], df
         per_device_train_batch_size=8,
         per_device_eval_batch_size=8,
         num_train_epochs=20,
-        eval_strategy="epoch",
+        evaluation_strategy="epoch",
         save_strategy="no",
         logging_dir=f"./logs_fold_{fold}",
         disable_tqdm=True
